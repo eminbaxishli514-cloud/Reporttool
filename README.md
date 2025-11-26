@@ -37,10 +37,12 @@ Optional flags:
 During runtime ReconGuard:
 
 1. Runs Nmap.
-2. Immediately asks whether you want to enable brute-force, XSS, or SQLi testing and how many payloads/guesses to take from the SecLists dictionaries (first _N_ entries only).
-3. Launches the crawler/Burp phase, where the requested attacks are applied only to relevant forms/parameters.
-
-All confirmed payloads/credentials are appended to the `BURP` section of `pen_result` for quick copy/paste into your final report.
+2. Immediately launches the crawler to map forms, parameters, and login fields.
+3. After discovery, walks through exploitation stages in order:
+   - Ask to run SQL injection tests (only if forms/parameters exist), prompting for how many payloads to pull from SecLists (first _N_ entries).
+   - Ask to run reflected XSS (only if input fields exist).
+   - Ask to run credential brute-force (only if login fields were detected).
+4. Consolidates every finding and successful payload/credential into the `BURP` section of `pen_result`.
 
 ## Output
 
