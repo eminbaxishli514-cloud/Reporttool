@@ -846,6 +846,20 @@ def main():
             1 for form in spider.forms if all(spider.identify_login_fields(form["fields"]))
         )
 
+        # Filter forms with actual user-input elements (ignore pure navigation fragments)
+        def has_user_inputs(form):
+            meaningful_types = {"text", "email", "password", "search", "number", "tel", "url"}
+            for field in form["fields"]:
+                if field["type"] in meaningful_types or not field["type"]:
+                    return True
+            return False
+
+        spider.forms = [form for form in spider.forms if has_user_inputs(form)]
+        forms_count = len(spider.forms)
+        login_form_count = sum(
+            1 for form in spider.forms if all(spider.identify_login_fields(form["fields"]))
+        )
+
         # SQLi phase (first)
         if param_count or forms_count:
             if prompt_yes_no("Run SQL injection testing using Generic-SQLi.txt?"):
