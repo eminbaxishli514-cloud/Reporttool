@@ -352,33 +352,34 @@ class WebSpider:
         self.form_signatures = set()
 
     def crawl(self, url, current_depth):
-        if current_depth > self.depth or url in self.visited:
+        canonical_url = urlparse(url)._replace(fragment="").geturl()
+        if current_depth > self.depth or canonical_url in self.visited:
             return
         
         with self.lock:
-            self.visited.add(url)
+            self.visited.add(canonical_url)
         
-        log(f"Crawling: {url}", "INFO")
+        log(f"Crawling: {canonical_url}", "INFO")
         
         try:
             headers = {'User-Agent': 'Mozilla/5.0 (ReconGuard CLI)'}
-            res = requests.get(url, headers=headers, timeout=5, verify=False)
-            self.record_param_url(url)
+            res = requests.get(canonical_url, headers=headers, timeout=5, verify=False)
+            self.record_param_url(canonical_url)
             
             # 1. Header Analysis
-            self.check_headers(url, res.headers)
+            self.check_headers(canonical_url, res.headers)
             
             soup = BeautifulSoup(res.text, 'html.parser')
             
             # 2. Form Analysis & Vulnerability Injection
             if self.check_vulns:
-                self.scan_forms(url, soup)
+                self.scan_forms(canonical_url, soup)
 
             # 3. Recursive Link Extraction
             links = soup.find_all('a', href=True)
             for link in links:
                 href = link['href']
-                full_url = urljoin(url, href)
+                full_url = urljoin(canonical_url, href)
                 self.record_param_url(full_url)
                 
                 # Stay in scope
@@ -402,10 +403,9 @@ class WebSpider:
             method = form.get('method', 'get').lower()
             inputs = form.find_all('input')
             textareas = form.find_all('textarea')
-            input_elements = inputs + textareas
-            fields_meta = []
-            
-            log(f"Found form at {url} -> {action} ({method})", "INFO")
+            selects = form.find_all('select')
+            input_elements = inputs + textareas + selects
+            fields_meta = self.extract_meaningful_fields(input_elements)
             
             # CSRF Check
             if method == 'post':
@@ -416,20 +416,8 @@ class WebSpider:
             # Build target URL
             target_endpoint = urljoin(url, action)
             canonical_endpoint = urlparse(target_endpoint)._replace(fragment="").geturl()
-            for element in input_elements:
-                field_name = element.get('name')
-                raw_type = element.get('type') if hasattr(element, "get") else None
-                field_type = (raw_type or 'text').lower()
-                if field_name:
-                    fields_meta.append({
-                        "name": field_name,
-                        "type": field_type
-                    })
-                    if 'id' in field_name.lower():
-                        self.id_indicators.add(field_name.lower())
-
             if not fields_meta:
-                log(f"Skipping form at {target_endpoint} - no named input fields detected.", "WARN")
+                log(f"Skipping form at {target_endpoint} - no meaningful input fields detected.", "WARN")
                 continue
 
             signature = (
@@ -442,12 +430,43 @@ class WebSpider:
                 continue
             self.form_signatures.add(signature)
 
+            log(f"Tracking form at {canonical_endpoint} ({method}) with {len(fields_meta)} field(s)", "INFO")
+
             self.forms.append({
                 "source": url,
                 "endpoint": target_endpoint,
                 "method": method,
                 "fields": fields_meta
             })
+
+    def extract_meaningful_fields(self, elements):
+        meaningful_types = {"text", "email", "password", "search", "number", "tel", "url", "textarea", "select"}
+        ignored_types = {"button", "submit", "reset", "image", "hidden", "checkbox", "radio", "file", "range", "color", "date", "time"}
+        fields_meta = []
+        for element in elements:
+            tag_name = getattr(element, "name", "").lower()
+            field_name = element.get('name') or element.get('id')
+            if tag_name == 'input':
+                field_type = (element.get('type') or 'text').lower()
+                if field_type in ignored_types:
+                    continue
+            elif tag_name == 'textarea':
+                field_type = 'textarea'
+            elif tag_name == 'select':
+                field_type = 'select'
+            else:
+                continue
+            if not field_name:
+                continue
+            if field_type not in meaningful_types:
+                continue
+            fields_meta.append({
+                "name": field_name,
+                "type": field_type
+            })
+            if 'id' in field_name.lower():
+                self.id_indicators.add(field_name.lower())
+        return fields_meta
 
     def identify_login_fields(self, elements):
         username_field = None
@@ -781,6 +800,14 @@ def main():
     xss_limit = 0
     sqli_enabled = False
     sqli_limit = 0
+    forms_count = 0
+    param_count = 0
+    id_count = 0
+    login_form_count = 0
+    spider = None
+    sqli_attempted = False
+    xss_attempted = False
+    brute_attempted = False
 
     # 1. Run Nmap (Foreground - blocking)
     if not args.skip_nmap:
