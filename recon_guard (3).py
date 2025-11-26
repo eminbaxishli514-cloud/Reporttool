@@ -415,19 +415,25 @@ class WebSpider:
             
             # Build target URL
             target_endpoint = urljoin(url, action)
+            canonical_endpoint = urlparse(target_endpoint)._replace(fragment="").geturl()
             for element in input_elements:
                 field_name = element.get('name')
                 raw_type = element.get('type') if hasattr(element, "get") else None
                 field_type = (raw_type or 'text').lower()
-                fields_meta.append({
-                    "name": field_name,
-                    "type": field_type
-                })
-                if field_name and 'id' in field_name.lower():
-                    self.id_indicators.add(field_name.lower())
+                if field_name:
+                    fields_meta.append({
+                        "name": field_name,
+                        "type": field_type
+                    })
+                    if 'id' in field_name.lower():
+                        self.id_indicators.add(field_name.lower())
+
+            if not fields_meta:
+                log(f"Skipping form at {target_endpoint} - no named input fields detected.", "WARN")
+                continue
 
             signature = (
-                target_endpoint,
+                canonical_endpoint,
                 method,
                 tuple(sorted((field["name"] or f"field_{idx}") for idx, field in enumerate(fields_meta)))
             )
