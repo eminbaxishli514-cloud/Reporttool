@@ -81,7 +81,7 @@ COMMON_PORT_NOTES = {
 }
 
 # --- DEPENDENCY CHECK ---
-def check_deps():
+def check_deps(require_dirb=True):
     missing = []
     try:
         import requests
@@ -107,6 +107,11 @@ def check_deps():
     if subprocess.call("which nmap", shell=True, stdout=subprocess.DEVNULL) != 0:
         print(f"{Colors.FAIL}[!] Nmap binary not found in PATH.{Colors.ENDC}")
         print("    Please install: sudo apt install nmap")
+        sys.exit(1)
+
+    if require_dirb and subprocess.call("which dirb", shell=True, stdout=subprocess.DEVNULL) != 0:
+        print(f"{Colors.FAIL}[!] Dirb binary not found in PATH.{Colors.ENDC}")
+        print("    Please install: sudo apt install dirb")
         sys.exit(1)
 
 # Import after check
@@ -298,6 +303,61 @@ class NmapScanner:
         # Basic parsing for summary (requires lxml or xml.etree)
         # We'll stick to text feedback for CLI simplicity
         pass
+
+# ==========================================
+# MODULE 1.5: DIRB WRAPPER (Fast Discovery)
+# ==========================================
+class DirbScanner:
+    def __init__(self, target_url, wordlist_path, extra_args=None):
+        self.target_url = target_url
+        self.wordlist_path = wordlist_path
+        self.extra_args = extra_args or []
+        safe_host = urlparse(target_url).netloc.replace(":", "_")
+        self.output_file = f"dirb_{safe_host}.txt"
+
+    def run(self):
+        log(f"Launching Dirb against {self.target_url} using {self.wordlist_path}", "INFO")
+        cmd = ["dirb", self.target_url, self.wordlist_path]
+        if self.extra_args:
+            cmd.extend(self.extra_args)
+        cmd.extend(["-o", self.output_file])
+
+        discovered_urls = []
+        stdout_lines = []
+        stderr_lines = []
+
+        try:
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            stdout, stderr = process.communicate()
+            if stdout:
+                stdout_lines = [line for line in stdout.splitlines() if line.strip()]
+                for line in stdout_lines:
+                    match = re.search(r"\+\s+(https?://[^\s]+)", line)
+                    if match:
+                        discovered_urls.append(match.group(1))
+            if stderr:
+                stderr_lines = [line for line in stderr.splitlines() if line.strip()]
+
+            rc = process.returncode
+            if rc == 0:
+                log("Dirb completed successfully.", "SUCCESS")
+            else:
+                log("Dirb exited with errors.", "WARN")
+
+        except Exception as exc:
+            log(f"Dirb execution failed: {exc}", "ERROR")
+            stderr_lines.append(str(exc))
+            rc = 1
+
+        output_path = os.path.abspath(self.output_file) if os.path.exists(self.output_file) else "Unavailable"
+        return {
+            "command": " ".join(cmd),
+            "return_code": rc,
+            "stdout": "\n".join(stdout_lines) or "No stdout captured.",
+            "stderr": "\n".join(stderr_lines),
+            "output_path": output_path,
+            "urls": discovered_urls
+        }
 
 # ==========================================
 # MODULE 2: BURP-LIKE SPIDER & SCANNER
@@ -755,6 +815,7 @@ def main():
     parser.add_argument("--skip-nmap", action="store_true", help="Skip Nmap scan")
     parser.add_argument("--skip-spider", action="store_true", help="Skip Web Spider")
     parser.add_argument("--skip-sniff", action="store_true", help="Skip Packet Sniffing")
+    parser.add_argument("--skip-dirb", action="store_true", help="Skip Dirb web discovery")
     parser.add_argument("--nmap-args", default="", help="Custom Nmap arguments (overrides defaults)")
     parser.add_argument("--sqli-wordlist", default="/usr/share/seclists/Fuzzing/SQL Injection/Generic-SQLi.txt",
                         help="Path to SQLi payload wordlist (defaults to SecLists Generic-SQLi)")
@@ -762,6 +823,9 @@ def main():
                         help="Path to XSS payload wordlist (defaults to SecLists XSS-Common)")
     parser.add_argument("--bruteforce-wordlist", default="/usr/share/seclists/Passwords/Common-Credentials/common.txt",
                         help="Path to credential brute-force wordlist (defaults to SecLists common.txt)")
+    parser.add_argument("--dirb-wordlist", default="/usr/share/wordlists/dirb/common.txt",
+                        help="Path to Dirb wordlist (defaults to /usr/share/wordlists/dirb/common.txt)")
+    parser.add_argument("--dirb-args", default="", help="Additional arguments passed directly to Dirb")
     
     args = parser.parse_args()
     
@@ -776,11 +840,12 @@ def main():
             GUARD EDITION v2.0
     {Colors.ENDC}""")
     
-    check_deps()
+    check_deps(require_dirb=not args.skip_dirb)
 
     target = args.target
     report = ReportWriter()
 
+    base_url = f"http://{target}"
     # Resolve Target
     try:
         target_ip = socket.gethostbyname(target)
@@ -808,6 +873,40 @@ def main():
     sqli_attempted = False
     xss_attempted = False
     brute_attempted = False
+    dirb_seed_urls = []
+
+    # 0. Run Dirb for rapid discovery
+    if args.skip_dirb:
+        report.add_section("DIRB", "Dirb discovery skipped per operator choice.")
+    else:
+        dirb_wordlist = ensure_wordlist(
+            [
+                args.dirb_wordlist,
+                "/usr/share/wordlists/dirb/common.txt",
+                "/usr/share/dirb/wordlists/common.txt"
+            ],
+            "Dirb web content (common.txt)",
+            "sudo apt install dirb",
+            "Try: locate common.txt"
+        )
+        dirb_args = shlex.split(args.dirb_args) if args.dirb_args else None
+        dirb_scanner = DirbScanner(base_url, dirb_wordlist, extra_args=dirb_args)
+        dirb_result = dirb_scanner.run()
+        dirb_seed_urls = dirb_result["urls"]
+        dirb_report_lines = [
+            f"Command Status : {'Success' if dirb_result['return_code'] == 0 else 'Failed'}",
+            f"Command Line   : {dirb_result['command']}",
+            f"Output File    : {dirb_result['output_path']}",
+            "",
+            "[STDOUT]",
+            dirb_result["stdout"]
+        ]
+        if dirb_result["stderr"]:
+            dirb_report_lines.extend(["", "[STDERR]", dirb_result["stderr"]])
+        if dirb_seed_urls:
+            dirb_report_lines.extend(["", "Discovered URLs:"])
+            dirb_report_lines.extend(f"- {url}" for url in dirb_seed_urls)
+        report.add_section("DIRB", "\n".join(dirb_report_lines))
 
     # 1. Run Nmap (Foreground - blocking)
     if not args.skip_nmap:
@@ -851,17 +950,18 @@ def main():
             "administrator", "root", "welcome", "passw0rd", "changeme"
         ]
 
-        url = f"http://{target}"
         log("Starting Web Spider/Scanner...", "INFO")
         spider = WebSpider(
-            url,
+            base_url,
             depth=3,
             check_vulns=True,
             sqli_wordlist=default_sqli_payloads[:],
             xss_wordlist=default_xss_payloads[:],
             brute_wordlist=default_brute_payloads[:]
         )
-        spider.crawl(url, 0)
+        spider.crawl(base_url, 0)
+        for seeded_url in dirb_seed_urls:
+            spider.crawl(seeded_url, 0)
         
         log(f"Spider completed. Found {len(spider.findings)} issues.", "SUCCESS")
         for f in spider.findings:
