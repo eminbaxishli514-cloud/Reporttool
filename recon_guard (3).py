@@ -174,12 +174,26 @@ def prompt_int(question, default):
             return int(raw)
         print("Please enter a positive integer.")
 
-def ensure_wordlist(path, description, install_hint):
-    if not os.path.isfile(path):
-        print(f"{Colors.FAIL}[!] Missing {description} wordlist: {path}{Colors.ENDC}")
-        print(f"    Install with: {install_hint}")
-        print(f"    Expected to find file at: {path}")
-        sys.exit(1)
+def ensure_wordlist(paths, description, install_hint):
+    """
+    Accept a string path or iterable of candidate paths.
+    Return the first existing path; otherwise exit with install guidance.
+    """
+    if isinstance(paths, (list, tuple, set)):
+        candidates = [os.path.expanduser(p) for p in paths if p]
+    else:
+        candidates = [os.path.expanduser(paths)]
+
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate
+
+    expected = candidates[0] if candidates else "UNSPECIFIED"
+    print(f"{Colors.FAIL}[!] Missing {description} wordlist: {expected}{Colors.ENDC}")
+
+    print(f"    Install with: {install_hint}")
+    print(f"    Expected to find file at: {expected}")
+    sys.exit(1)
 
 # ==========================================
 # MODULE 1: NMAP WRAPPER (The "Muscle")
@@ -754,26 +768,44 @@ def main():
         report.add_section("NMAP", "\n".join(nmap_report))
 
     # 2. Run Spider (Foreground - blocking)
+    brute_enabled = False
+    brute_limit = 0
+    xss_enabled = False
+    xss_limit = 0
+    sqli_enabled = False
+    sqli_limit = 0
+
     if not args.skip_spider:
-        ensure_wordlist(
-            args.sqli_wordlist,
+        sqli_path = ensure_wordlist(
+            [args.sqli_wordlist, "/usr/share/seclists/Fuzzing/SQLi/Generic-SQLi.txt", "/usr/share/seclists/Fuzzing/SQL Injection/Generic-SQLi.txt"],
             "SQL Injection (SecLists Generic-SQLi)",
             "sudo apt install seclists"
         )
-        ensure_wordlist(
-            args.xss_wordlist,
+        xss_path = ensure_wordlist(
+            [args.xss_wordlist, "/usr/share/seclists/Fuzzing/XSS/XSS-Common.txt"],
             "XSS (SecLists XSS-Common)",
             "sudo apt install seclists"
         )
-        ensure_wordlist(
-            args.bruteforce_wordlist,
+        brute_path = ensure_wordlist(
+            [args.bruteforce_wordlist, "/usr/share/seclists/Passwords/Common-Credentials/common.txt"],
             "Credential brute-force (SecLists common.txt)",
             "sudo apt install seclists"
         )
+
+        if prompt_yes_no("Run credential brute-force attempts using common.txt?"):
+            brute_enabled = True
+            brute_limit = prompt_int("Number of password guesses to try", 25)
+        if prompt_yes_no("Run reflected XSS testing using XSS-Common.txt?"):
+            xss_enabled = True
+            xss_limit = prompt_int("Number of XSS payloads to test", 25)
+        if prompt_yes_no("Run SQL injection testing using Generic-SQLi.txt?"):
+            sqli_enabled = True
+            sqli_limit = prompt_int("Number of SQLi payloads to test", 25)
+
         url = f"http://{target}"
         log("Starting Web Spider/Scanner...", "INFO")
         sqli_payloads = load_wordlist(
-            [args.sqli_wordlist],
+            [sqli_path],
             [
                 "'",
                 "'--",
@@ -785,7 +817,7 @@ def main():
             ]
         )
         xss_payloads = load_wordlist(
-            [args.xss_wordlist],
+            [xss_path],
             [
                 '"><script>alert(1)</script>',
                 '"><img src=x onerror=alert(1)>',
@@ -797,7 +829,7 @@ def main():
             ]
         )
         brute_payloads = load_wordlist(
-            [args.bruteforce_wordlist],
+            [brute_path],
             [
                 "admin", "password", "123456", "letmein", "qwerty",
                 "administrator", "root", "welcome", "passw0rd", "changeme"
@@ -819,36 +851,37 @@ def main():
         forms_count = len(spider.forms)
         param_count = len(spider.param_urls)
         id_count = len(spider.id_indicators)
-        brute_label = os.path.basename(args.bruteforce_wordlist) or args.bruteforce_wordlist
 
         brute_attempted = False
         xss_attempted = False
         sqli_attempted = False
 
-        if forms_count:
-            if prompt_yes_no(f"{forms_count} form(s) detected. Launch credential brute-force using {brute_label}?"):
+        if brute_enabled:
+            if forms_count:
                 brute_attempted = True
-                guess_limit = prompt_int("Number of password guesses to try", 25)
-                spider.run_bruteforce_attacks(guess_limit)
+                spider.run_bruteforce_attacks(brute_limit)
+            else:
+                log("Brute-force requested but no input fields were discovered.", "WARN")
         else:
-            log("No input fields found; skipping brute-force option.", "WARN")
+            log("Brute-force testing not requested.", "INFO")
 
-        if forms_count:
-            if prompt_yes_no("Run reflected XSS fuzzing against discovered input fields?"):
+        if xss_enabled:
+            if forms_count:
                 xss_attempted = True
-                xss_limit = prompt_int("Number of XSS payloads to test", 25)
                 spider.run_xss_checks(xss_limit)
+            else:
+                log("XSS testing requested but no input fields were discovered.", "WARN")
         else:
-            log("No input fields found; skipping XSS option.", "WARN")
+            log("XSS testing not requested.", "INFO")
 
-        if id_count or param_count:
-            prompt_msg = f"{param_count} parameterized URL(s) / {id_count} id-like field(s) detected. Run SQLi testing?"
-            if prompt_yes_no(prompt_msg):
+        if sqli_enabled:
+            if id_count or param_count or forms_count:
                 sqli_attempted = True
-                sqli_limit = prompt_int("Number of SQLi payloads to test", 25)
                 spider.run_sqli_checks(sqli_limit)
+            else:
+                log("SQLi testing requested but no parameters or forms were discovered.", "WARN")
         else:
-            log("No ID parameters detected; skipping SQLi option.", "WARN")
+            log("SQLi testing not requested.", "INFO")
 
         if spider.findings:
             findings_text = "\n".join(
