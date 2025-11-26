@@ -902,6 +902,7 @@ def main():
                     "Try: locate Generic-SQLi.txt"
                 )
                 spider.sqli_wordlist = load_wordlist([sqli_path], default_sqli_payloads)
+                log(f"Using first {sqli_limit} of {len(spider.sqli_wordlist)} SQLi payloads.", "INFO")
                 spider.run_sqli_checks(sqli_limit)
                 sqli_attempted = True
             else:
@@ -925,6 +926,7 @@ def main():
                     "Try: locate XSS-Common.txt (or use XSS-Jhaddix.txt)"
                 )
                 spider.xss_wordlist = load_wordlist([xss_path], default_xss_payloads)
+                log(f"Using first {xss_limit} of {len(spider.xss_wordlist)} XSS payloads.", "INFO")
                 spider.run_xss_checks(xss_limit)
                 xss_attempted = True
             else:
@@ -946,6 +948,7 @@ def main():
                     "Try: locate common.txt"
                 )
                 spider.brute_wordlist = load_wordlist([brute_path], default_brute_payloads)
+                log(f"Using first {brute_limit} of {len(spider.brute_wordlist)} passwords for brute-force.", "INFO")
                 spider.run_bruteforce_attacks(brute_limit)
                 brute_attempted = True
             else:
