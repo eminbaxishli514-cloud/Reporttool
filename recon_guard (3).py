@@ -793,19 +793,7 @@ def main():
             nmap_report.extend(["", "[STDERR]", nmap_result["stderr"]])
         report.add_section("NMAP", "\n".join(nmap_report))
 
-    if not args.skip_spider:
-        print("\nConfigure application-layer tests (post-Nmap):")
-        sqli_enabled = prompt_yes_no("Enable SQL injection testing using Generic-SQLi.txt?")
-        if sqli_enabled:
-            sqli_limit = prompt_int("Number of SQLi payloads to test", 25)
-        xss_enabled = prompt_yes_no("Enable reflected XSS testing using XSS-Common.txt?")
-        if xss_enabled:
-            xss_limit = prompt_int("Number of XSS payloads to test", 25)
-        brute_enabled = prompt_yes_no("Enable credential brute-force using common.txt?")
-        if brute_enabled:
-            brute_limit = prompt_int("Number of password guesses to try", 25)
-
-    # 2. Run Spider (Foreground - blocking)
+    # 2. Run Spider (discovery first)
     if not args.skip_spider:
         default_sqli_payloads = [
             "'",
@@ -830,58 +818,15 @@ def main():
             "administrator", "root", "welcome", "passw0rd", "changeme"
         ]
 
-        if sqli_enabled:
-            sqli_path = ensure_wordlist(
-                [
-                    args.sqli_wordlist,
-                    "/usr/share/seclists/Fuzzing/SQLi/Generic-SQLi.txt",
-                    "/usr/share/seclists/Fuzzing/SQL Injection/Generic-SQLi.txt"
-                ],
-                "SQL Injection (SecLists Generic-SQLi)",
-                "sudo apt install seclists",
-                "Try: locate Generic-SQLi.txt"
-            )
-            sqli_payloads = load_wordlist([sqli_path], default_sqli_payloads)
-        else:
-            sqli_payloads = default_sqli_payloads[:]
-
-        if xss_enabled:
-            xss_path = ensure_wordlist(
-                [
-                    args.xss_wordlist,
-                    "/usr/share/seclists/Fuzzing/XSS/XSS-Common.txt"
-                ],
-                "XSS (SecLists XSS-Common)",
-                "sudo apt install seclists",
-                "Try: locate XSS-Common.txt"
-            )
-            xss_payloads = load_wordlist([xss_path], default_xss_payloads)
-        else:
-            xss_payloads = default_xss_payloads[:]
-
-        if brute_enabled:
-            brute_path = ensure_wordlist(
-                [
-                    args.bruteforce_wordlist,
-                    "/usr/share/seclists/Passwords/Common-Credentials/common.txt"
-                ],
-                "Credential brute-force (SecLists common.txt)",
-                "sudo apt install seclists",
-                "Try: locate common.txt"
-            )
-            brute_payloads = load_wordlist([brute_path], default_brute_payloads)
-        else:
-            brute_payloads = default_brute_payloads[:]
-
         url = f"http://{target}"
         log("Starting Web Spider/Scanner...", "INFO")
         spider = WebSpider(
             url,
             depth=3,
             check_vulns=True,
-            sqli_wordlist=sqli_payloads,
-            xss_wordlist=xss_payloads,
-            brute_wordlist=brute_payloads
+            sqli_wordlist=default_sqli_payloads[:],
+            xss_wordlist=default_xss_payloads[:],
+            brute_wordlist=default_brute_payloads[:]
         )
         spider.crawl(url, 0)
         
@@ -891,37 +836,75 @@ def main():
         forms_count = len(spider.forms)
         param_count = len(spider.param_urls)
         id_count = len(spider.id_indicators)
+        login_form_count = sum(
+            1 for form in spider.forms if all(spider.identify_login_fields(form["fields"]))
+        )
 
-        brute_attempted = False
-        xss_attempted = False
-        sqli_attempted = False
-
-        if brute_enabled:
-            if forms_count:
-                brute_attempted = True
-                spider.run_bruteforce_attacks(brute_limit)
-            else:
-                log("Brute-force requested but no input fields were discovered.", "WARN")
-        else:
-            log("Brute-force testing not requested.", "INFO")
-
-        if xss_enabled:
-            if forms_count:
-                xss_attempted = True
-                spider.run_xss_checks(xss_limit)
-            else:
-                log("XSS testing requested but no input fields were discovered.", "WARN")
-        else:
-            log("XSS testing not requested.", "INFO")
-
-        if sqli_enabled:
-            if id_count or param_count or forms_count:
-                sqli_attempted = True
+        # SQLi phase (first)
+        if param_count or forms_count:
+            if prompt_yes_no("Run SQL injection testing using Generic-SQLi.txt?"):
+                sqli_limit = prompt_int("Number of SQLi payloads to test", 25)
+                sqli_path = ensure_wordlist(
+                    [
+                        args.sqli_wordlist,
+                        "/usr/share/seclists/Fuzzing/SQLi/Generic-SQLi.txt",
+                        "/usr/share/seclists/Fuzzing/SQL Injection/Generic-SQLi.txt"
+                    ],
+                    "SQL Injection (SecLists Generic-SQLi)",
+                    "sudo apt install seclists",
+                    "Try: locate Generic-SQLi.txt"
+                )
+                spider.sqli_wordlist = load_wordlist([sqli_path], default_sqli_payloads)
                 spider.run_sqli_checks(sqli_limit)
+                sqli_attempted = True
             else:
-                log("SQLi testing requested but no parameters or forms were discovered.", "WARN")
+                log("SQLi testing skipped by operator.", "INFO")
         else:
-            log("SQLi testing not requested.", "INFO")
+            log("Skipping SQLi testing: no forms or parameterized URLs discovered.", "WARN")
+
+        # XSS phase (only if inputs exist)
+        if forms_count:
+            if prompt_yes_no("Run reflected XSS testing using XSS-Common.txt?"):
+                xss_limit = prompt_int("Number of XSS payloads to test", 25)
+                xss_path = ensure_wordlist(
+                    [
+                        args.xss_wordlist,
+                        "/usr/share/seclists/Fuzzing/XSS/XSS-Common.txt",
+                        "/usr/share/seclists/Fuzzing/XSS/human-friendly/XSS-Jhaddix.txt",
+                        "/usr/share/seclists/Fuzzing/XSS/human-friendly/XSS-RSNAKE.txt"
+                    ],
+                    "XSS (SecLists XSS-Common)",
+                    "sudo apt install seclists",
+                    "Try: locate XSS-Common.txt (or use XSS-Jhaddix.txt)"
+                )
+                spider.xss_wordlist = load_wordlist([xss_path], default_xss_payloads)
+                spider.run_xss_checks(xss_limit)
+                xss_attempted = True
+            else:
+                log("XSS testing skipped by operator.", "INFO")
+        else:
+            log("Skipping XSS testing: no input fields discovered.", "WARN")
+
+        # Brute-force phase (only if login forms exist)
+        if login_form_count:
+            if prompt_yes_no("Run credential brute-force using common.txt?"):
+                brute_limit = prompt_int("Number of password guesses to try", 25)
+                brute_path = ensure_wordlist(
+                    [
+                        args.bruteforce_wordlist,
+                        "/usr/share/seclists/Passwords/Common-Credentials/common.txt"
+                    ],
+                    "Credential brute-force (SecLists common.txt)",
+                    "sudo apt install seclists",
+                    "Try: locate common.txt"
+                )
+                spider.brute_wordlist = load_wordlist([brute_path], default_brute_payloads)
+                spider.run_bruteforce_attacks(brute_limit)
+                brute_attempted = True
+            else:
+                log("Brute-force testing skipped by operator.", "INFO")
+        else:
+            log("Skipping brute-force: no login forms detected.", "WARN")
 
         if spider.findings:
             findings_text = "\n".join(
@@ -935,6 +918,7 @@ def main():
             f"Forms Found   : {forms_count}",
             f"Param URLs    : {param_count}",
             f"ID Indicators : {id_count}",
+            f"Login Forms   : {login_form_count}",
             "",
             "Findings:",
             findings_text
