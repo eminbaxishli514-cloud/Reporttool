@@ -1,5 +1,3 @@
-# Reporttool
-A versatile report and attack tool that can carry out brute force, exploit XSS vulnearbilities and do SQL injections using dictionaries. It also has the functionality of NMAP, Burpsuite and Wireshark and returns a detailed report to the user with explanations
 # ReconGuard – Penetration Workflow Helper
 
 ReconGuard stitches together three battle-tested workflows—Nmap scanning, Burp-style crawling, and Wireshark-style packet capture—into a single CLI you can run on Linux targets. All module outputs are aggregated into a `pen_result` report in the working directory, alongside the raw artifacts (`nmap_<target>.xml`, `capture_<ip>.pcap`).
@@ -36,13 +34,13 @@ Optional flags:
 - `--xss-wordlist <path>`: Override reflected XSS payload list (default: `/usr/share/seclists/Fuzzing/XSS/XSS-Common.txt`)
 - `--bruteforce-wordlist <path>`: Credentials dictionary for login cracking (default: `/usr/share/seclists/Passwords/Common-Credentials/common.txt`)
 
-During runtime, ReconGuard first runs Nmap, then launches the crawler. If it discovers input fields or ID parameters it will interactively prompt you to:
+During runtime ReconGuard:
 
-1. Launch credential brute-force attempts (against the supplied `common.txt` or your custom list).
-2. Spray XSS payloads from the configured XSS wordlist.
-3. Fire SQL injection payloads when ID-looking parameters or query strings are observed.
+1. Runs Nmap.
+2. Immediately asks whether you want to enable brute-force, XSS, or SQLi testing and how many payloads/guesses to take from the SecLists dictionaries (first _N_ entries only).
+3. Launches the crawler/Burp phase, where the requested attacks are applied only to relevant forms/parameters.
 
-All successful payloads/credentials are appended to the `BURP` section of `pen_result` for quick copy/paste into your final report.
+All confirmed payloads/credentials are appended to the `BURP` section of `pen_result` for quick copy/paste into your final report.
 
 ## Output
 
@@ -51,5 +49,4 @@ All successful payloads/credentials are appended to the `BURP` section of `pen_r
 - `capture_<ip>.pcap`: Packet capture ready for Wireshark
 
 Review these artifacts to continue deeper manual testing or documentation.
-
 
